@@ -88,32 +88,45 @@ class HazardRateCurve:
         self._times = times
         self._rates = rates
 
-    def _interp_lambda(self, t: float) -> float:
-        """Linear interpolation with flat extrapolation for λ(t)."""
-        times, rates = self._times, self._rates
-        if t <= times[0]:
-            return rates[0]
-        if t >= times[-1]:
-            return rates[-1]
-        lo, hi = 0, len(times) - 1
-        while hi - lo > 1:
-            mid = (lo + hi) // 2
-            if times[mid] <= t:
-                lo = mid
-            else:
-                hi = mid
-        t0, t1 = times[lo], times[hi]
-        r0, r1 = rates[lo], rates[hi]
-        w = (t - t0) / (t1 - t0)
-        return r0 + w * (r1 - r0)
-
     def survival_probability(self, end_date: date) -> float:
         """
-        Simple exponential using the linearly interpolated λ at T:
-            S(T) = exp(-λ(T) * T),  where T = year_fraction(valuation_date, end_date).
+        Match VBA interpolation logic:
+        - Interpolate cumulative hazard (rate * year_fraction) between surrounding nodes.
+        - Then S(T) = exp(- cumulative_hazard).
         """
         T = year_fraction(self.valuation_date, end_date, basis="ACT/365F")
         if T <= 0.0:
             return 1.0
-        lam_T = self._interp_lambda(T)
-        return math.exp(-lam_T * T)
+
+        times, rates = self._times, self._rates
+
+        # Before first knot
+        if T <= times[0]:
+            H = rates[0] * T
+            return math.exp(-H)
+
+        # After last knot
+        if T >= times[-1]:
+            H = rates[-1] * T
+            return math.exp(-H)
+
+        # Find bracketing nodes
+        lo, hi = 0, len(times) - 1
+        while hi - lo > 1:
+            mid = (lo + hi) // 2
+            if times[mid] <= T:
+                lo = mid
+            else:
+                hi = mid
+
+        t0, t1 = times[lo], times[hi]
+        r0, r1 = rates[lo], rates[hi]
+
+        # cumulative hazard values at nodes
+        H0 = r0 * t0
+        H1 = r1 * t1
+
+        # interpolate cumulative hazard
+        H = H0 + (H1 - H0) * (T - t0) / (t1 - t0)
+
+        return math.exp(-H)
