@@ -90,28 +90,38 @@ class HazardRateCurve:
 
     def survival_probability(self, end_date: date) -> float:
         """
-        Match VBA interpolation logic:
-        - Interpolate cumulative hazard (rate * year_fraction) between surrounding nodes.
-        - Then S(T) = exp(- cumulative_hazard).
+        Line-for-line match of the VBA-style logic you showed, but:
+        - First compute the interpolated HAZARD RATE (no time scaling).
+        - Finally plug that rate into exp(-rate * year_fraction).
+
+        Uses the curve's knots loaded into self._times (year-fractions from valuation_date)
+        and self._rates (instantaneous hazards at those knots). Assumes self._times[0] == 0.0
+        is a synthetic entry; the first real knot is index 1.
         """
         T = year_fraction(self.valuation_date, end_date, basis="ACT/365F")
         if T <= 0.0:
             return 1.0
 
-        times, rates = self._times, self._rates
+        times = self._times
+        rates = self._rates
+        if not times or not rates:
+            raise ValueError("Hazard curve not initialized.")
 
-        # Before first knot
-        if T <= times[0]:
-            H = rates[0] * T
-            return math.exp(-H)
+        # first real knot index (skip synthetic 0.0 if present)
+        first = 1 if len(times) >= 2 and abs(times[0]) < 1e-16 else 0
 
-        # After last knot
+        # Before first knot -> use first knot's rate
+        if T <= times[first]:
+            lam = rates[first]
+            return math.exp(-lam * T)
+
+        # After last knot -> use last knot's rate
         if T >= times[-1]:
-            H = rates[-1] * T
-            return math.exp(-H)
+            lam = rates[-1]
+            return math.exp(-lam * T)
 
-        # Find bracketing nodes
-        lo, hi = 0, len(times) - 1
+        # Find bracketing knots so that times[lo] <= T <= times[hi]
+        lo, hi = first, len(times) - 1
         while hi - lo > 1:
             mid = (lo + hi) // 2
             if times[mid] <= T:
@@ -122,11 +132,9 @@ class HazardRateCurve:
         t0, t1 = times[lo], times[hi]
         r0, r1 = rates[lo], rates[hi]
 
-        # cumulative hazard values at nodes
-        H0 = r0 * t0
-        H1 = r1 * t1
+        # LINEAR INTERPOLATION OF THE HAZARD RATE (no time scaling here)
+        w = (T - t0) / (t1 - t0) if t1 != t0 else 0.0
+        lam = r0 + w * (r1 - r0)
 
-        # interpolate cumulative hazard
-        H = H0 + (H1 - H0) * (T - t0) / (t1 - t0)
-
-        return math.exp(-H)
+        # FINAL STEP: plug interpolated rate into exponential with the year fraction
+        return math.exp(-lam * T)
