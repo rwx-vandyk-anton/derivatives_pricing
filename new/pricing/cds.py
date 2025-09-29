@@ -1,3 +1,10 @@
+import pandas as pd
+from datetime import date as pydate, timedelta
+from typing import List, Tuple
+
+# Each schedule row: (accrual_start_date, pay_date, year_fraction_for_period)
+Schedule = List[Tuple[pydate, pydate, float]]
+
 def build_cds_premium_df(
     schedule: Schedule,
     hazard_curve,                 # survival_probability(d: date) -> float
@@ -7,61 +14,81 @@ def build_cds_premium_df(
     rate: float
 ) -> pd.DataFrame:
     """
+    Build CDS premium-leg cashflow DataFrame.
+
     survival            = S(pay_date - 1 day) / S(val_date + 1 day)
-    accrual_df          = DF(val_date -> midpoint_date),
-                          where midpoint_date =
+    discount_factor     = DF(val_date -> pay_date)
+    cashflow            = nominal * rate * year_fraction
+
+    accrual_df          = DF(val_date -> midpoint_date), where midpoint_date is:
                             - FIRST ROW: midpoint of [val_date, pay_date]
                             - OTHER ROWS: midpoint of [accrual_start, pay_date]
                           midpoint uses round((end - start).days / 2)
+
     accrual_prob_term   = 0.5 * (survival_prev - survival_curr) with survival_prev for first row = 1
-    pv                  = survival*cashflow*discount_factor + accrual_prob_term*accrual_df*cashflow
+
+    pv                  = survival*cashflow*discount_factor
+                          + accrual_prob_term*accrual_df*cashflow
     """
-    cols = ["accrual_start", "pay_date", "year_fraction",
-            "survival", "discount_factor", "cashflow",
-            "accrual_df", "accrual_prob_term", "pv"]
+    cols = [
+        "accrual_start", "pay_date", "year_fraction",
+        "survival", "discount_factor", "cashflow",
+        "accrual_df", "accrual_prob_term", "pv"
+    ]
 
     if not schedule:
         return pd.DataFrame(columns=cols)
 
+    # Base frame (keep Python date objects; no .dt usage)
     df = pd.DataFrame(schedule, columns=["accrual_start", "pay_date", "year_fraction"])
 
-    # Keep only rows with pay_date strictly after val_date
+    # Keep only rows with pay_date strictly after valuation date
     df = df[df["pay_date"] > val_date].reset_index(drop=True)
+    if df.empty:
+        return pd.DataFrame(columns=cols)
 
-    # Denominator: survival one day after valuation date
+    # Normalization denominator: survival one day after valuation date
     denom_date = val_date + timedelta(days=1)
     denom = max(hazard_curve.survival_probability(denom_date), 1e-16)
 
     # Survival to (pay_date - 1 day), normalized
-    df["survival"] = df["pay_date"].apply(lambda d: hazard_curve.survival_probability(d - timedelta(days=1))) / denom
+    survivals = []
+    for pay in df["pay_date"]:
+        s = hazard_curve.survival_probability(pay - timedelta(days=1)) / denom
+        survivals.append(s)
+    df["survival"] = survivals
 
-    # DF(val_date -> pay_date)
-    df["discount_factor"] = df["pay_date"].apply(lambda d: discount_curve.discount_factor(val_date, d))
+    # Discount factor to pay_date
+    dfs_pay = [discount_curve.discount_factor(val_date, pay) for pay in df["pay_date"]]
+    df["discount_factor"] = dfs_pay
 
-    # Fixed premium cashflow amount
+    # Fixed premium cashflow amount per period
     df["cashflow"] = nominal * rate * df["year_fraction"]
 
     # Midpoint DF:
     # - first row: midpoint of [val_date, pay_date]
     # - others:    midpoint of [accrual_start, pay_date]
-    mid_start = df["accrual_start"].copy()
-    if not df.empty:
-        mid_start.iloc[0] = val_date  # special rule for first period
-
-    mid_days = (df["pay_date"] - mid_start).dt.days
-    mid_dates = mid_start + mid_days.apply(lambda n: timedelta(days=round(n / 2)))
-    df["accrual_df"] = mid_dates.apply(lambda d: discount_curve.discount_factor(val_date, d))
+    mid_dfs: List[float] = []
+    for i, row in df.iterrows():
+        start = row["accrual_start"] if i > 0 else val_date
+        pay   = row["pay_date"]
+        days = (pay - start).days
+        mid_date = start + timedelta(days=round(days / 2))
+        mid_dfs.append(discount_curve.discount_factor(val_date, mid_date))
+    df["accrual_df"] = mid_dfs
 
     # accrual_prob_term with prev survival = 1 for the first row
-    surv = df["survival"].to_numpy()
-    accrual_prob = []
-    for i, s_curr in enumerate(surv):
-        s_prev = 1.0 if i == 0 else surv[i - 1]
-        accrual_prob.append(0.5 * (s_prev - s_curr))
-    df["accrual_prob_term"] = accrual_prob
+    accrual_prob_terms: List[float] = []
+    prev_s = 1.0
+    for s_curr in df["survival"]:
+        accrual_prob_terms.append(0.5 * (prev_s - s_curr))
+        prev_s = s_curr
+    df["accrual_prob_term"] = accrual_prob_terms
 
     # PV per row
-    df["pv"] = df["survival"] * df["cashflow"] * df["discount_factor"] \
-             + df["accrual_prob_term"] * df["accrual_df"] * df["cashflow"]
+    df["pv"] = (
+        df["survival"] * df["cashflow"] * df["discount_factor"]
+        + df["accrual_prob_term"] * df["accrual_df"] * df["cashflow"]
+    )
 
-    return df
+    return df[cols]
