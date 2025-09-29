@@ -64,7 +64,8 @@ def _parse_float(s: str) -> Optional[float]:
 class HazardRateCurve:
     """
     Piecewise-linear instantaneous hazard-rate curve λ(t) with survival
-    S(T) = exp(-∫_0^T λ(τ) dτ), integrated via trapezoid rule on knot union.
+    S(T) = exp(-∫_0^T λ(τ) dτ). Since λ is linearly interpolated between knots,
+    the trapezoidal rule over the union grid (including T) is exact.
     """
     valuation_date: date
     _times: List[float] = field(default_factory=list, init=False)   # year-fractions from valuation_date
@@ -155,10 +156,14 @@ class HazardRateCurve:
 
     # ------------------------ Survival probability -------------------------
     def survival_probability(self, end_date: date) -> float:
+        """
+        Exact integral of a piecewise-linear λ via trapezoidal rule on the union grid.
+        """
         T = year_fraction(self.valuation_date, end_date, basis="ACT/365F")
         if T <= 0.0:
             return 1.0
 
+        # Build integration grid: 0, interior knots in (0, T), and T
         grid: List[float] = [0.0]
         for t in self._times[1:]:  # skip synthetic 0
             if 0.0 < t < T:
@@ -166,6 +171,8 @@ class HazardRateCurve:
         grid.append(T)
         grid.sort()
 
+        # Trapezoidal integration of λ(t). Because λ is linear between knots,
+        # this is the exact integral on each sub-interval.
         integral = 0.0
         lam_prev = self._interp_lambda(grid[0])
         for i in range(1, len(grid)):
