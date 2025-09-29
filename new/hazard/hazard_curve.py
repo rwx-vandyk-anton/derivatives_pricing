@@ -15,27 +15,43 @@ def year_fraction(start: date, end: date, basis: str = "ACT/365F") -> float:
     return (end - start).days / 365.0
 
 
+# Accepted date formats (ordered)
+_DATE_FMTS: tuple[str, ...] = ("%Y-%m-%d", "%d/%m/%Y", "%Y/%m/%d")
+
 def _parse_date_str(s: str, preferred_fmt: Optional[str] = None) -> Optional[date]:
     """
-    Parse a date string trying (in order): preferred_fmt (if given),
-    ISO 'YYYY-MM-DD', and 'DD/MM/YYYY'. Returns None if all fail.
+    Try preferred_fmt (if given) then the known formats in _DATE_FMTS.
+    Returns None if all fail.
     """
-    s = s.strip()
-    fmts = []
-    if preferred_fmt:
-        fmts.append(preferred_fmt)
-    fmts.extend(["%Y-%m-%d", "%d/%m/%Y"])
+    s = (s or "").strip()
+    fmts = ([preferred_fmt] if preferred_fmt else []) + list(_DATE_FMTS)
 
-    # Try datetime.strptime with known formats
     for fmt in fmts:
         try:
             return datetime.strptime(s, fmt).date()
         except Exception:
             pass
 
-    # Last chance: fromisoformat for strict ISO (handles e.g. '2026-01-01')
+    # Final attempt: strict ISO
     try:
         return date.fromisoformat(s)
+    except Exception:
+        return None
+
+
+def _parse_float(s: str) -> Optional[float]:
+    """
+    Parse a float allowing comma decimal separators and stray spaces.
+    Returns None if it cannot be parsed.
+    """
+    if s is None:
+        return None
+    s = s.strip().replace(" ", "")
+    # Handle European comma decimal
+    if "," in s and "." not in s:
+        s = s.replace(",", ".")
+    try:
+        return float(s)
     except Exception:
         return None
 
@@ -46,60 +62,44 @@ def _parse_date_str(s: str, preferred_fmt: Optional[str] = None) -> Optional[dat
 
 @dataclass
 class HazardRateCurve:
+    """
+    Piecewise-linear instantaneous hazard-rate curve λ(t) with survival
+    S(T) = exp(-∫_0^T λ(τ) dτ), integrated via trapezoid rule on knot union.
+    """
     valuation_date: date
-    _times: List[float] = field(default_factory=list, init=False)
-    _rates: List[float] = field(default_factory=list, init=False)
+    _times: List[float] = field(default_factory=list, init=False)   # year-fractions from valuation_date
+    _rates: List[float] = field(default_factory=list, init=False)   # instantaneous hazard λ(t)
 
     # ---------------------------- Loading ----------------------------------
     def load_from_csv(self, filepath: str, date_format: str | None = None) -> None:
         """
-        Populate the curve from a CSV with two columns: Date, HazardRate.
-
-        Parameters
-        ----------
-        filepath : str
-            Path to CSV file. Header optional. Extra columns ignored.
-        date_format : str | None
-            Optional strptime pattern, e.g. "%d/%m/%Y".
+        Populate from CSV with columns: Date, HazardRate (header optional).
+        Accepts dates in YYYY-MM-DD, DD/MM/YYYY, or YYYY/MM/DD.
         """
         rows: List[Tuple[date, float]] = []
-        # utf-8-sig strips a possible BOM (ï»¿) on the first header cell
+
+        # utf-8-sig removes a potential BOM (ï»¿) on the first cell
         with open(filepath, newline="", encoding="utf-8-sig") as f:
             reader = csv.reader(f)
 
-            # Peek first row to detect header by attempting parse
-            try:
-                first = next(reader)
-            except StopIteration:
-                raise ValueError("CSV is empty.")
-
-            def parse_row(row: List[str]) -> Tuple[date, float] | None:
+            for row in reader:
                 if not row or len(row) < 2:
-                    return None
+                    continue
+
                 d_raw, r_raw = row[0].strip(), row[1].strip()
 
-                # Parse date (accept multiple formats)
+                # Date
                 d = _parse_date_str(d_raw, preferred_fmt=date_format)
                 if d is None:
-                    # Not a data row (likely header)
-                    return None
+                    # Likely a header or bad row—skip
+                    continue
 
-                # Parse rate
-                try:
-                    r = float(r_raw)
-                except Exception:
-                    return None
+                # Rate (continuous instantaneous, per annum)
+                r = _parse_float(r_raw)
+                if r is None:
+                    continue
 
-                return d, r
-
-            parsed = parse_row(first)
-            if parsed is not None:
-                rows.append(parsed)
-
-            for row in reader:
-                parsed = parse_row(row)
-                if parsed is not None:
-                    rows.append(parsed)
+                rows.append((d, r))
 
         # Filter strictly after valuation_date, sort by date
         rows = [(d, r) for (d, r) in rows if d > self.valuation_date]
@@ -121,7 +121,7 @@ class HazardRateCurve:
             if t <= 0.0:
                 continue
             if times and abs(t - times[-1]) < 1e-12:
-                rates[-1] = r
+                rates[-1] = r  # replace duplicate time
             else:
                 times.append(t)
                 rates.append(r)
@@ -135,6 +135,7 @@ class HazardRateCurve:
 
     # ------------------------ Interpolation core ----------------------------
     def _interp_lambda(self, t: float) -> float:
+        """Linear interpolation with flat extrapolation for λ(t)."""
         times, rates = self._times, self._rates
         if t <= times[0]:
             return rates[0]
@@ -159,7 +160,7 @@ class HazardRateCurve:
             return 1.0
 
         grid: List[float] = [0.0]
-        for t in self._times[1:]:
+        for t in self._times[1:]:  # skip synthetic 0
             if 0.0 < t < T:
                 grid.append(t)
         grid.append(T)
