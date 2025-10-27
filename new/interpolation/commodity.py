@@ -4,21 +4,32 @@ from datetime import datetime
 
 
 def load_vol_surface(csv_path: str):
+    """
+    Loads a volatility surface CSV and cleans column headers
+    so they work whether numeric headers are strings or floats.
+    """
     df = pd.read_csv(csv_path)
-    df.columns = [str(c).strip() for c in df.columns]
+
+    cleaned_cols = []
+    for c in df.columns:
+        c_str = str(c).strip()
+        if c_str.lower() == "date":
+            cleaned_cols.append("Date")
+        else:
+            # Try to convert to float if possible
+            try:
+                cleaned_cols.append(float(c_str))
+            except ValueError:
+                cleaned_cols.append(c_str)
+    df.columns = cleaned_cols
+
     df["Date"] = pd.to_datetime(df["Date"]).dt.date
 
-    moneyness_cols = []
-    for c in df.columns:
-        if c == "Date":
-            continue
-        try:
-            moneyness_cols.append(float(c))
-        except ValueError:
-            pass
-
+    moneyness_cols = [c for c in df.columns if isinstance(c, (int, float))]
     moneyness_cols.sort()
-    df = df[["Date"] + [str(m) for m in moneyness_cols]]
+
+    df = df.loc[:, ["Date"] + moneyness_cols]
+
     return df, moneyness_cols
 
 
