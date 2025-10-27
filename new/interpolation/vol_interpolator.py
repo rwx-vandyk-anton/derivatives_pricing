@@ -1,36 +1,29 @@
-import json
+import pandas as pd
 from datetime import datetime
-from typing import Dict, List, Tuple
+from typing import List, Tuple
 
 
-def bilinear_vol_interpolation(
-    vol_surface_path: str,
+def bilinear_vol_interpolation_from_csv(
+    csv_path: str,
     strike: float,
     forward: float,
     cashflow_start: datetime,
     valuation_date: datetime
 ) -> float:
     """
-    Perform bilinear interpolation on a volatility surface loaded from a JSON file.
+    Perform bilinear interpolation on a volatility surface loaded from a CSV file.
 
     Parameters:
     -----------
-    vol_surface_path : str
-        Path to the JSON file containing the volatility surface data.
-        Expected structure:
-        {
-            "<surface_name>": {
-                "Surface": {
-                    ".Curve": {
-                        "meta": [...],
-                        "data": [
-                            [moneyness, year_frac, tenor, vol],
-                            ...
-                        ]
-                    }
-                }
-            }
-        }
+    csv_path : str
+        Path to the CSV file containing volatility surface data.
+        Expected columns:
+            'Expiry', 'Strike', 'Forward Vol', 'Year Frac'
+        - 'Expiry' (ignored)
+        - 'Strike' = moneyness
+        - 'Forward Vol' = volatility value
+        - 'Year Frac' = year fraction
+
     strike : float
         Strike price.
     forward : float
@@ -45,33 +38,34 @@ def bilinear_vol_interpolation(
     float
         Interpolated volatility.
     """
-    # Load JSON data from file
-    with open(vol_surface_path, "r") as f:
-        full_json = json.load(f)
+    # Load CSV data
+    df = pd.read_csv(csv_path)
 
-    # Get the first key dynamically (e.g., "InterestRateVol.ZAR_CAPFLOOR_SMILE_ICE/+7.500000")
-    surface_key = next(iter(full_json.keys()))
-    data = full_json[surface_key]["Surface"][".Curve"]["data"]
+    # Rename for consistency
+    df.columns = [col.strip() for col in df.columns]
 
-    # Calculate target moneyness and year fraction
+    # Extract relevant columns
+    data = df[["Strike", "Forward Vol", "Year Frac"]].values.tolist()
+
+    # Compute target values
     target_moneyness = (strike - forward) * 100
     target_year_frac = (cashflow_start - valuation_date).days / 365
 
-    # Extract unique moneyness and year_frac values
+    # Unique sorted axes
     moneyness_values = sorted(set(row[0] for row in data))
-    year_frac_values = sorted(set(row[1] for row in data))
+    year_frac_values = sorted(set(row[2] for row in data))
 
-    # Find bounding year_frac and moneyness
+    # Find bounding values
     y1, y2 = _find_bounds(year_frac_values, target_year_frac)
     m1, m2 = _find_bounds(moneyness_values, target_moneyness)
 
-    # Get the 4 corner volatilities
+    # Get the four corner volatilities
     vol_y1_m1 = _get_vol(data, y1, m1)
     vol_y1_m2 = _get_vol(data, y1, m2)
     vol_y2_m1 = _get_vol(data, y2, m1)
     vol_y2_m2 = _get_vol(data, y2, m2)
 
-    # Interpolate along moneyness
+    # Interpolate along moneyness first
     if m2 == m1:
         vol_y1 = vol_y1_m1
         vol_y2 = vol_y2_m1
@@ -89,6 +83,7 @@ def bilinear_vol_interpolation(
 
 
 def _find_bounds(sorted_values: List[float], target: float) -> Tuple[float, float]:
+    """Find the two bounding values in a sorted list."""
     if target <= sorted_values[0]:
         return sorted_values[0], sorted_values[0]
     if target >= sorted_values[-1]:
@@ -102,13 +97,15 @@ def _find_bounds(sorted_values: List[float], target: float) -> Tuple[float, floa
 
 
 def _get_vol(data: List[List[float]], year_frac: float, moneyness: float) -> float:
+    """Retrieve vol for a given (year_frac, moneyness) pair."""
     for row in data:
-        if abs(row[1] - year_frac) < 1e-9 and abs(row[0] - moneyness) < 1e-9:
-            return row[3]  # 4th column = volatility
+        if abs(row[0] - moneyness) < 1e-9 and abs(row[2] - year_frac) < 1e-9:
+            return row[1]
     raise ValueError(f"Could not find vol for year_frac={year_frac}, moneyness={moneyness}")
 
 
 def _linear_interp(x1: float, x2: float, y1: float, y2: float, x: float) -> float:
+    """Perform linear interpolation."""
     if x2 == x1:
         return y1
     return y1 + (y2 - y1) * (x - x1) / (x2 - x1)
