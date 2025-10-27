@@ -1,10 +1,10 @@
-import pandas as pd
 import numpy as np
+import pandas as pd
 from datetime import datetime
+from pandas.tseries.holiday import USFederalHolidayCalendar
 
 # ------------------------------------------------------------
-#  Business-day year fraction calculator (ACT/252)
-#  using U.S. business days and holidays
+# Business-day year fraction (ACT/252) accounting for U.S. holidays
 # ------------------------------------------------------------
 def business_yearfrac_us(start_date: datetime, end_date: datetime) -> float:
     """
@@ -13,28 +13,30 @@ def business_yearfrac_us(start_date: datetime, end_date: datetime) -> float:
     Parameters
     ----------
     start_date : datetime
-        Valuation or start date.
+        Start date (valuation date).
     end_date : datetime
-        Expiry or target date.
+        End date (expiry or target date).
 
     Returns
     -------
     float
         Year fraction (business days / 252).
     """
-    # US holiday calendar
-    us_cal = pd.tseries.holiday.USFederalHolidayCalendar()
-    holidays = us_cal.holidays(start=start_date, end=end_date)
-    
-    # Generate all business days between start and end
+    # Initialize US Federal Holiday Calendar
+    cal = USFederalHolidayCalendar()
+    holidays = cal.holidays(start=start_date, end=end_date)
+
+    # Generate all business days (excl. weekends + US holidays)
     bdays = pd.bdate_range(start=start_date, end=end_date, holidays=holidays)
-    n_bdays = len(bdays) - 1 if len(bdays) > 0 else 0  # exclude start date
     
+    # Number of business days (exclude start date)
+    n_bdays = max(len(bdays) - 1, 0)
+
     return n_bdays / 252.0
 
 
 # ------------------------------------------------------------
-#  Linear-on-total-variance interpolation
+# Linear-on-total-variance interpolation
 # ------------------------------------------------------------
 def interpolate_linear_on_variance(date1, vol1, date2, vol2, target_date, valuation_date=None):
     """
